@@ -1,0 +1,12 @@
+---
+# Quick links beyond the lab itself.
+- Glenride:
+    - Mission Control:
+        - abbr: MC
+          href: https://mission.dvaughnhouse.com
+    - Gateway:
+        - abbr: DH
+          href: https://dvaughnhouse.com
+    - Homelab Dispatch:
+        - abbr: HL
+          href: https://homelab-ai3.pages.dev

@@ -1,0 +1,62 @@
+---
+# Homepage services. 192.168.1.191 is replaced by your iMac's IP when you run
+# ./setup.sh. `server`/`container` hook each card to live Docker status.
+- Alerts & Monitoring:
+    - Healthchecks:
+        icon: healthchecks.png
+        href: http://192.168.1.191:8008
+        description: Cron dead-man's switch — sweeps, digest, job scraper
+        server: my-docker
+        container: healthchecks
+    - changedetection.io:
+        icon: changedetection.png
+        href: http://192.168.1.191:5000
+        description: Page watches — FDA shortages, grants, careers pages
+        server: my-docker
+        container: changedetection
+    - ntfy:
+        icon: ntfy.png
+        href: http://192.168.1.191:8086
+        description: Push alerts to your phone
+        server: my-docker
+        container: ntfy
+
+- Files, Vault & Documents:
+    - Vaultwarden:
+        icon: vaultwarden.png
+        href: http://192.168.1.191:8081
+        description: Your password vault (Bitwarden apps)
+        server: my-docker
+        container: vaultwarden
+    - Syncthing:
+        icon: syncthing.png
+        href: http://192.168.1.191:8384
+        description: Studio / iMac / laptop sync
+        server: my-docker
+        container: syncthing
+    - Paperless-ngx:
+        icon: paperless-ngx.png
+        href: http://192.168.1.191:8001
+        description: Document archive (profile docs — only runs when started)
+        server: my-docker
+        container: paperless
+
+- Tools:
+    - Karakeep:
+        icon: karakeep.png
+        href: http://192.168.1.191:3001
+        description: Bookmarks, AI-tagged (profile tools)
+        server: my-docker
+        container: karakeep
+    - Stirling-PDF:
+        icon: stirling-pdf.png
+        href: http://192.168.1.191:8082
+        description: Every PDF operation, locally (profile tools)
+        server: my-docker
+        container: stirling-pdf
+    - AdGuard Home:
+        icon: adguard-home.png
+        href: http://192.168.1.191:3002
+        description: House DNS ad blocking (profile network)
+        server: my-docker
+        container: adguard

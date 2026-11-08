@@ -1,0 +1,336 @@
+# =============================================================================
+# Homelab Tier 1 starter stack — D'Vaughn's iMac (Arch / Omarchy, Docker)
+# =============================================================================
+# CORE (starts with plain `docker compose up -d`):
+#   homepage        lab front door            http://<IMAC_IP>:3000
+#   ntfy            push alerts to phone      http://<IMAC_IP>:8086
+#   healthchecks    cron dead-man's switch    http://<IMAC_IP>:8008
+#   changedetection page-change watches       http://<IMAC_IP>:5000
+#   vaultwarden     password vault            http://<IMAC_IP>:8081
+#   syncthing       machine-to-machine sync   http://<IMAC_IP>:8384
+#
+# OPTIONAL PROFILES (start only when you want them):
+#   --profile docs     paperless-ngx          http://<IMAC_IP>:8001
+#   --profile tools    stirling-pdf           http://<IMAC_IP>:8082
+#                      karakeep               http://<IMAC_IP>:3001
+#   --profile network  adguard-home           http://<IMAC_IP>:3002  (DNS on :53)
+#
+# Example:  docker compose --profile docs --profile tools up -d
+#
+# All secrets / IPs come from .env (created by ./setup.sh — never edit secrets
+# into this file). Exposure model: LAN + Tailscale only. Do NOT port-forward
+# any of these ports on the router.
+#
+# Port note (2026-10-22, this iMac): ntfy is on 8086 (not its usual 8080 —
+# ThinkTank OS web owns 8080) and Healthchecks is on 8008 (not 8000 —
+# D'Quizz owns 8000). Container-side ports are unchanged.
+# =============================================================================
+
+services:
+
+  # ------------------------------------------------------------------ homepage
+  homepage:
+    image: ghcr.io/gethomepage/homepage:latest
+    container_name: homepage
+    restart: unless-stopped
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      # Required by Homepage — the hosts it will answer to. setup.sh fills this.
+      HOMEPAGE_ALLOWED_HOSTS: ${HOMEPAGE_ALLOWED_HOSTS:-localhost:3000,127.0.0.1:3000}
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./homepage/config:/app/config
+      # Read-only Docker socket: lets Homepage show live container status.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  # ---------------------------------------------------------------------- ntfy
+  # Alert pipe. Agents/cron POST to a topic, your phone buzzes.
+  # NTFY_UPSTREAM_BASE_URL is REQUIRED for instant push on iOS (per ntfy docs,
+  # self-hosted servers forward iOS notifications through ntfy.sh upstream).
+  ntfy:
+    image: binwiederhier/ntfy:latest
+    container_name: ntfy
+    restart: unless-stopped
+    command: serve
+    environment:
+      TZ: ${TZ:-America/New_York}
+      NTFY_BASE_URL: http://${IMAC_IP:-localhost}:8086
+      NTFY_CACHE_FILE: /var/lib/ntfy/cache.db
+      NTFY_AUTH_FILE: /var/lib/ntfy/auth.db
+      NTFY_ATTACHMENT_CACHE_DIR: /var/lib/ntfy/attachments
+      NTFY_AUTH_DEFAULT_ACCESS: deny-all
+      NTFY_ENABLE_LOGIN: "true"
+      NTFY_BEHIND_PROXY: "true"
+      NTFY_UPSTREAM_BASE_URL: https://ntfy.sh
+    ports:
+      - "8086:80"
+    volumes:
+      - ./data/ntfy:/var/lib/ntfy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --tries=1 http://localhost:80/v1/health -O - | grep -Eo '\"healthy\"\\s*:\\s*true' || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # -------------------------------------------------------------- healthchecks
+  # Cron dead-man's switch. Each scheduled job pings its check URL when it
+  # runs; if a ping is late, Healthchecks alerts you (wire it to ntfy inside
+  # the UI: Integrations -> ntfy, server http://ntfy:80, topic homelab).
+  healthchecks:
+    image: lscr.io/linuxserver/healthchecks:latest
+    container_name: healthchecks
+    restart: unless-stopped
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-America/New_York}
+      SECRET_KEY: ${HC_SECRET_KEY:?Run ./setup.sh first — it generates .env}
+      SITE_ROOT: http://${IMAC_IP:-localhost}:8008
+      SITE_NAME: Homelab Healthchecks
+      SUPERUSER_EMAIL: ${HC_SUPERUSER_EMAIL:-dvaughnhouse@gmail.com}
+      SUPERUSER_PASSWORD: ${HC_SUPERUSER_PASSWORD:?Run ./setup.sh first}
+      ALLOWED_HOSTS: "*"
+      CSRF_TRUSTED_ORIGINS: http://${IMAC_IP:-localhost}:8008
+      APPRISE_ENABLED: "True"
+      DEBUG: "False"
+    ports:
+      - "8008:8000"
+    volumes:
+      - ./data/healthchecks:/config
+
+  # ----------------------------------------------------------- changedetection
+  # Page watches (FDA shortages, grant pages, careers pages...).
+  # In the UI, set the global notification URL (guide has the exact line) —
+  # changedetection talks to the ntfy container directly over this network.
+  changedetection:
+    build:
+      context: ./patched
+      dockerfile: Dockerfile.changedetection
+    image: changedetection-patched:emudhra-fix
+    container_name: changedetection
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-America/New_York}
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data/changedetection:/datastore
+
+  # --------------------------------------------------------------- vaultwarden
+  # Your password vault (Bitwarden-compatible apps/extensions work with it).
+  # SIGNUPS_ALLOWED starts "true" so you can create your account, then flip it
+  # to "false" in .env and re-run `docker compose up -d` (guide, step 7).
+  # NOTE: the web vault works over LAN http, but the Bitwarden PHONE app needs
+  # https — put Vaultwarden behind Nginx Proxy Manager / your Cloudflare
+  # Tunnel hostname later and update DOMAIN in .env to that https URL.
+  vaultwarden:
+    image: vaultwarden/server:latest
+    container_name: vaultwarden
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${VW_DOMAIN:-http://${IMAC_IP:-localhost}:8081}
+      SIGNUPS_ALLOWED: ${VW_SIGNUPS_ALLOWED:-true}
+      INVITATIONS_ALLOWED: "true"
+      SHOW_PASSWORD_HINT: "false"
+      WEBSOCKET_ENABLED: "true"
+      ADMIN_TOKEN: '$$argon2id$$v=19$$m=65536,t=3,p=4$$alNuVXl5VU5hMFhWUThKeg$$5YUyIqWdGovTQQ1SUt419qQ5ze9RVjXYPJuhEd39UJ0'
+      LOG_LEVEL: warn
+    networks:
+      - default
+      - thinktank-os_default
+    ports:
+      - "8081:80"
+    volumes:
+      - ./data/vaultwarden:/data
+
+  # ----------------------------------------------------------------- syncthing
+  # Mac Studio <-> iMac <-> laptop sync, no cloud. In the Syncthing UI add the
+  # folder path /sync (that is ./sync on the iMac) and pair your other devices.
+  # Set a GUI username/password in the UI on first login (Settings -> GUI).
+  syncthing:
+    image: lscr.io/linuxserver/syncthing:latest
+    container_name: syncthing
+    hostname: imac-homelab
+    restart: unless-stopped
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-America/New_York}
+    ports:
+      - "8384:8384"
+      - "22000:22000/tcp"
+      - "22000:22000/udp"
+      - "21027:21027/udp"
+    volumes:
+      - ./data/syncthing:/config
+      - ./sync:/sync
+
+  # ============================================================ PROFILE: docs
+  # Paperless-ngx — OCR + searchable archive for documents.
+  # First login: the admin user from .env (PAPERLESS_ADMIN_USER / _PASSWORD).
+  # Drop files to index into ./paperless/consume — Paperless eats them from
+  # there automatically. Originals live in the paperless_media volume.
+  paperless:
+    image: ghcr.io/paperless-ngx/paperless-ngx:latest
+    container_name: paperless
+    restart: unless-stopped
+    profiles: ["docs"]
+    depends_on:
+      - paperless-db
+      - paperless-broker
+    ports:
+      - "8001:8000"
+    volumes:
+      - paperless_data:/usr/src/paperless/data
+      - paperless_media:/usr/src/paperless/media
+      - ./paperless/consume:/usr/src/paperless/consume
+      - ./paperless/export:/usr/src/paperless/export
+    environment:
+      PAPERLESS_REDIS: redis://paperless-broker:6379
+      PAPERLESS_DBHOST: paperless-db
+      PAPERLESS_DBNAME: paperless
+      PAPERLESS_DBUSER: paperless
+      PAPERLESS_DBPASS: ${PAPERLESS_DB_PASSWORD:?Run ./setup.sh first}
+      PAPERLESS_SECRET_KEY: ${PAPERLESS_SECRET_KEY:?Run ./setup.sh first}
+      PAPERLESS_URL: http://${IMAC_IP:-localhost}:8001
+      PAPERLESS_TIME_ZONE: ${TZ:-America/New_York}
+      PAPERLESS_OCR_LANGUAGE: eng
+      USERMAP_UID: ${PUID:-1000}
+      USERMAP_GID: ${PGID:-1000}
+      PAPERLESS_ADMIN_USER: ${PAPERLESS_ADMIN_USER:-dvaughn}
+      PAPERLESS_ADMIN_PASSWORD: ${PAPERLESS_ADMIN_PASSWORD:?Run ./setup.sh first}
+
+  paperless-broker:
+    image: docker.io/library/redis:7-alpine
+    container_name: paperless-broker
+    restart: unless-stopped
+    profiles: ["docs"]
+    volumes:
+      - paperless_redis:/data
+
+  paperless-db:
+    image: docker.io/library/postgres:16-alpine
+    container_name: paperless-db
+    restart: unless-stopped
+    profiles: ["docs"]
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD: ${PAPERLESS_DB_PASSWORD:?Run ./setup.sh first}
+    volumes:
+      - paperless_pgdata:/var/lib/postgresql/data
+
+  # =========================================================== PROFILE: tools
+  # Stirling-PDF — every PDF operation locally. Login is enabled; on first
+  # login use the default credentials from Stirling's own documentation and
+  # CHANGE them immediately (Settings inside the app).
+  stirling-pdf:
+    image: stirlingtools/stirling-pdf:latest
+    container_name: stirling-pdf
+    restart: unless-stopped
+    profiles: ["tools"]
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./data/stirling/tessdata:/usr/share/tessdata
+      - ./data/stirling/configs:/configs
+      - ./data/stirling/logs:/logs
+      - ./data/stirling/pipeline:/pipeline
+    environment:
+      SECURITY_ENABLELOGIN: "true"
+      SYSTEM_DEFAULTLOCALE: en_US
+      LANGS: en_GB
+
+  # Karakeep — bookmark everything, AI-tagged. Three containers (app, headless
+  # Chrome for page capture, Meilisearch for full-text search).
+  # AI tagging is OFF until you give it a model: in .env set either
+  #   OLLAMA_BASE_URL=http://<MAC_STUDIO_IP>:11434   (if Ollama runs there)
+  # or Karakeep's OpenAI-compatible settings pointing at LM Studio, then
+  # re-run `docker compose --profile tools up -d`. Guide has the details.
+  karakeep:
+    image: ghcr.io/karakeep-app/karakeep:${KARAKEEP_VERSION:-release}
+    container_name: karakeep
+    restart: unless-stopped
+    profiles: ["tools"]
+    depends_on:
+      - karakeep-chrome
+      - karakeep-meilisearch
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./data/karakeep:/data
+    environment:
+      DATA_DIR: /data
+      MEILI_ADDR: http://karakeep-meilisearch:7700
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?Run ./setup.sh first}
+      BROWSER_WEB_URL: http://karakeep-chrome:9222
+      NEXTAUTH_URL: http://${IMAC_IP:-localhost}:3001
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Run ./setup.sh first}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      # After you create your Karakeep account, set KARAKEEP_DISABLE_SIGNUPS=true
+      # in .env and re-run `docker compose --profile tools up -d`.
+      DISABLE_SIGNUPS: ${KARAKEEP_DISABLE_SIGNUPS:-false}
+
+  karakeep-chrome:
+    image: gcr.io/zenika-hub/alpine-chrome:123
+    container_name: karakeep-chrome
+    restart: unless-stopped
+    profiles: ["tools"]
+    command:
+      - --no-sandbox
+      - --disable-gpu
+      - --disable-dev-shm-usage
+      - --remote-debugging-address=0.0.0.0
+      - --remote-debugging-port=9222
+      - --hide-scrollbars
+
+  karakeep-meilisearch:
+    image: getmeili/meilisearch:v1.13.3
+    container_name: karakeep-meilisearch
+    restart: unless-stopped
+    profiles: ["tools"]
+    environment:
+      MEILI_ENV: production
+      MEILI_NO_ANALYTICS: "true"
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?Run ./setup.sh first}
+    volumes:
+      - karakeep_meilisearch:/meili_data
+
+  # ========================================================= PROFILE: network
+  # AdGuard Home — house-wide DNS ad/tracker blocking.
+  # FIRST-RUN WIZARD: open http://<IMAC_IP>:3002 and in the wizard set the
+  # "Admin Web Interface" port to 3000 (that keeps the dashboard reachable at
+  # :3002 afterwards) and the DNS port to 53. Then point your router's DNS
+  # (or a single device first, to test) at the iMac's IP.
+  # If :53 is already taken on the iMac the container will fail to start —
+  # the guide shows the one command to check.
+  adguard:
+    image: adguard/adguardhome:latest
+    container_name: adguard
+    restart: unless-stopped
+    profiles: ["network"]
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "3002:3000/tcp"
+    volumes:
+      - ./data/adguard/work:/opt/adguardhome/work
+      - ./data/adguard/conf:/opt/adguardhome/conf
+    environment:
+      TZ: ${TZ:-America/New_York}
+
+volumes:
+  paperless_data:
+  paperless_media:
+  paperless_redis:
+  paperless_pgdata:
+  karakeep_meilisearch:
+
+networks:
+  default:
+  thinktank-os_default:
+    external: true
+    name: thinktank-os_default

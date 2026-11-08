@@ -1,0 +1,4 @@
+---
+# Homepage -> Docker on this machine (socket mounted read-only in compose).
+my-docker:
+  socket: /var/run/docker.sock

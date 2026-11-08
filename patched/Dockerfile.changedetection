@@ -1,0 +1,2 @@
+FROM ghcr.io/dgtlmoon/changedetection.io:latest
+RUN pip install --no-cache-dir 'certifi>=2026.10.19' || pip3 install --no-cache-dir 'certifi>=2026.10.19'
